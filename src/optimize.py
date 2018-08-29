@@ -9,8 +9,10 @@ STYLE_LAYERS = ('relu1_1', 'relu2_1', 'relu3_1', 'relu4_1', 'relu5_1')
 CONTENT_LAYER = 'relu4_2'
 # DEVICES = 'CUDA_VISIBLE_DEVICES'
 
-def _tensor_size(feature_map):
-	return feature_map[1] * feature_map[2] * feature_map[3]
+def _tensor_size(tensor):
+	from operator import mul
+	return functools.reduce(mul, (d.value for d in tensor.get_shape()[1:]), 1)
+
 
 def optimize(
 		content_target, style_target, content_weight, style_weight,
