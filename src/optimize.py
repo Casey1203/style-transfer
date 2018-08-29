@@ -9,6 +9,9 @@ STYLE_LAYERS = ('relu1_1', 'relu2_1', 'relu3_1', 'relu4_1', 'relu5_1')
 CONTENT_LAYER = 'relu4_2'
 # DEVICES = 'CUDA_VISIBLE_DEVICES'
 
+def _tensor_size(feature_map):
+	return feature_map[1] * feature_map[2] * feature_map[3]
+
 def optimize(
 		content_target, style_target, content_weight, style_weight,
 		tv_weight, vgg_path, epochs=2, print_iterations=1000,
@@ -25,6 +28,7 @@ def optimize(
 
 	with tf.Graph.as_default(), tf.device('/cpu:0'),tf.Session() as sess:
 		style_image = tf.placeholder(tf.float32, shape=style_shape, name='style_image')
+		# 把style_image直接经过vgg提取特征
 		style_image_pro = vgg.preprocess(style_image)
 		style_net = vgg.net(vgg_path, style_image_pro)
 		style_pro = np.array(style_target) # 转换格式
@@ -35,34 +39,43 @@ def optimize(
 			style_features[layer] = gamma
 	with tf.Graph.as_default(), tf.Session() as sess:
 		x_content = tf.placeholder(tf.float32, shape=batch_shape, name='x_content')
+		# 把content图片直接通过vggnet提取特征
 		x_pro = vgg.preprocess(x_content)
 		content_features = {}
 		content_net = vgg.net(vgg_path, x_pro)
 		content_features[CONTENT_LAYER] = content_net[CONTENT_LAYER]
-
-		preds = transform.net(x_content / 255.0) # 归一化
+		# 把content图片先通过transform网络，把style融合，得到和原图片size一样的图片
+		preds = transform.net(x_content / 255.0) # /255.0:归一化。把图片先feedforward到transform网络中
 		preds_pro = vgg.preprocess(preds)
-
 		net = vgg.net(vgg_path, preds_pro)
 		content_size = _tensor_size(content_features[CONTENT_LAYER]) * batch_size
-		# 经过生成网络和不经过生成网络，在vgg提取特征的差异
-		content_loss = content_weight * (2 * tf.nn.l2_loss(net[CONTENT_LAYER] - content_features[CONTENT_LAYER]) / content_size)
+		# 经过生成网络，不经过生成网络，直接在vgg提取特征的图片。两张图片求差异
+		content_loss = \
+			content_weight * (2 * tf.nn.l2_loss(net[CONTENT_LAYER] - content_features[CONTENT_LAYER]) / content_size)
+		# 除以content_size，loss与content_size无关
 
 		style_losses = []
 
 		for style_layer in STYLE_LAYERS:
-			layer = net[style_layer]
+			layer = net[style_layer] # transform网络
 			bs, height, width, filters = map(lambda i: i.value, layer.get_shape())
 			size = height * width * filters
 			feats = tf.reshape(layer, (bs, height * width, filters))
-			feats_T = tf.transpose(feats, perm=[0, 2, 1])
-			gamma = tf.matmul(feats_T, feats) / size
+			feats_T = tf.transpose(feats, perm=[0, 2, 1]) # 把filter的维度提前
+			gamma = tf.matmul(feats_T, feats) / size # transform网络在风格上的loss，loss与size无关
 
-			style_gamma = style_features[style_layer]
+			style_gamma = style_features[style_layer] # 之前计算的，用vgg直接跑，不用transform网络。当前layer的gamma值
 			style_losses.append(2 * tf.nn.l2_loss(gamma - style_gamma) / style_gamma.size)
-		style_losses = style_weight * functools.reduce(tf.add, style_losses)
+		style_loss = style_weight * functools.reduce(tf.add, style_losses)
 
-		loss = content_loss + style_losses
+		# total variation denoising
+		tv_y_size = _tensor_size(preds[:, 1:, :, :])
+		tv_x_size = _tensor_size(preds[:, :, 1:, :])
+		y_tv = tf.nn.l2_loss(preds[:, 1:, :, :] - preds[:, :batch_shape[1]-1, :, :])
+		x_tv = tf.nn.l2_loss(preds[:, :, 1:, :] - preds[:, :, :batch_shape[2]-1, :])
+		tv_loss = tv_weight * 2 * (x_tv/tv_x_size + y_tv/tv_y_size) / batch_size
+
+		loss = content_loss + style_loss + tv_loss
 
 		train_step = tf.train.AdamOptimizer(learning_rate).minimize(loss)
 		sess.run(tf.global_variables_initializer())
@@ -74,7 +87,7 @@ def optimize(
 				curr = iterations * batch_size
 				step = curr + batch_size
 				x_batch = np.zeros(batch_shape, dtype=np.float32)
-				for j, img_p in enumerate(content_target[curr:step]):
+				for j, img_p in enumerate(content_target[curr: step]):
 					x_batch[j] = get_img(img_p, (256, 256, 3)).astype(np.float32)
 				iterations += 1
 				assert x_batch.shape[0] == batch_size
@@ -91,15 +104,15 @@ def optimize(
 				should_print = is_print_iter or is_last
 
 				if should_print:
-					to_get = [style_losses, content_loss, loss, preds]
+					to_get = [style_loss, content_loss, loss, preds]
 					test_dict = {x_content: x_batch}
 					tmp = sess.run(to_get, feed_dict=test_dict)
-					_style_loss, _content_loss, _loss, = tmp
+					_style_loss, _content_loss, _loss, _preds = tmp
 					losses = (_style_loss, _content_loss, _loss)
 
 					saver = tf.train.Saver()
 
 					res = saver.save(sess, save_path)
-				yield (_preds, losses, iterations, epoch)
+					yield (_preds, losses, iterations, epoch)
 
 
