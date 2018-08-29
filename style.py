@@ -1,6 +1,5 @@
 import sys, os
 
-sys.path.insert(0, src)
 from argparse import ArgumentParser
 from src.utils import get_img, exists
 from src.optimize import optimize
@@ -128,7 +127,7 @@ def main():
 
 	args = [
 		content_targets,
-		style_targets,
+		style_target,
 		options.content_weight,
 		options.style_weight,
 		options.tv_weight,
